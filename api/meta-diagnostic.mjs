@@ -15,12 +15,18 @@ export async function handler(req,env=process.env,fetcher=fetch,clock=()=>Date.n
   const data=await admin.json();if(data.mode!=='TEST_ONLY'||data.outbound_enabled!==false)return json({error:'ADMIN_REQUIRED'},403);
  }catch{return json({error:'AUTH_CHECK_UNAVAILABLE'},503)}
  let p;try{if(!(req.headers.get('content-type')||'').startsWith('application/json'))throw Error();const raw=await req.text();if(raw.length>400)throw Error();p=JSON.parse(raw)}catch{return json({error:'INVALID_REQUEST'},400)}
- if(!p||!['status','send_test','send_pair','ga_validate'].includes(p.op))return json({error:'INVALID_REQUEST'},400);
- if(p.op==='ga_validate'){
+ if(!p||!['status','send_test','send_pair','ga_validate','ga_send'].includes(p.op))return json({error:'INVALID_REQUEST'},400);
+ if(p.op==='ga_validate'||p.op==='ga_send'){
   if(p.confirm!==true)return json({error:'CONFIRMATION_REQUIRED'},400);
-  if(!/^G-[A-Z0-9]+$/.test(env.GA4_MEASUREMENT_ID||'')||!env.GA4_API_SECRET)return json({configured:false,error:'GA4_CONFIG_MISSING'},503);
-  const url='https://www.google-analytics.com/debug/mp/collect?measurement_id='+encodeURIComponent(env.GA4_MEASUREMENT_ID)+'&api_secret='+encodeURIComponent(env.GA4_API_SECRET);
-  try{const r=await fetcher(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:'123456789.987654321',validation_behavior:'ENFORCE_RECOMMENDATIONS',events:[{name:'sm_integration_diagnostic',params:{debug_mode:1,engagement_time_msec:1}}]}),redirect:'error',signal:AbortSignal.timeout(10000)});const b=await r.json();return json({configured:true,validation_passed:r.ok&&Array.isArray(b.validationMessages)&&b.validationMessages.length===0,validation_count:Array.isArray(b.validationMessages)?b.validationMessages.length:null,http:r.status,reporting_event_sent:false,credentials_verified:false});}catch{return json({error:'GA4_VALIDATION_UNAVAILABLE'},502)}
+  if(env.GA4_MEASUREMENT_ID!=='G-HGLMQDH5S8'||typeof env.GA4_API_SECRET!=='string'||!env.GA4_API_SECRET.trim())return json({configured:false,error:'GA4_CONFIG_MISSING_OR_WRONG_STREAM'},503);
+  const qs='?measurement_id='+encodeURIComponent(env.GA4_MEASUREMENT_ID)+'&api_secret='+encodeURIComponent(env.GA4_API_SECRET);
+  const payload={client_id:'123456789.987654321',consent:{ad_user_data:'DENIED',ad_personalization:'DENIED'},events:[{name:'sm_server_diagnostic',params:{debug_mode:1,engagement_time_msec:1,diagnostic_only:'yes'}}]};
+  const post=(path,body)=>fetcher('https://www.google-analytics.com'+path+qs,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),redirect:'error',signal:AbortSignal.timeout(10000)});
+  try{const r=await post('/debug/mp/collect',{...payload,validation_behavior:'ENFORCE_RECOMMENDATIONS'});const b=await r.json();const valid=r.ok&&Array.isArray(b.validationMessages)&&b.validationMessages.length===0;
+  if(!valid||p.op==='ga_validate')return json({configured:true,validation_passed:valid,validation_count:Array.isArray(b.validationMessages)?b.validationMessages.length:null,http:r.status,reporting_event_sent:false,credentials_verified:false});
+  const sent=await post('/mp/collect',payload);
+  return json({configured:true,validation_passed:true,http:sent.status,request_accepted:sent.ok,event_name:'sm_server_diagnostic',debug_mode:true,reporting_receipt_verified:false,check:'GA4 DebugView'});
+  }catch{return json({error:'GA4_REQUEST_UNAVAILABLE_RECONCILE_BEFORE_RETRY'},502)}
  }
  const configured=env.META_DATASET_ID===DATASET&&typeof env.META_CAPI_ACCESS_TOKEN==='string'&&env.META_CAPI_ACCESS_TOKEN.length>20;
  if(!configured)return json({configured:false,error:'META_CONFIG_MISSING_OR_WRONG_DATASET'},503);
