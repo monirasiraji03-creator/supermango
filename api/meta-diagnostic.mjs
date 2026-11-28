@@ -19,18 +19,34 @@ export async function handler(req,env=process.env,fetcher=fetch,clock=()=>Date.n
   const data=await admin.json();if(data.mode!=='TEST_ONLY'||data.outbound_enabled!==false)return json({error:'ADMIN_REQUIRED'},403);
  }catch{return json({error:'AUTH_CHECK_UNAVAILABLE'},503)}
  let p;try{if(!(req.headers.get('content-type')||'').startsWith('application/json'))throw Error();const raw=await req.text();if(raw.length>400)throw Error();p=JSON.parse(raw)}catch{return json({error:'INVALID_REQUEST'},400)}
- if(!p||!['status','send_test','send_pair','ga_validate','ga_send'].includes(p.op))return json({error:'INVALID_REQUEST'},400);
- if(p.op==='ga_validate'||p.op==='ga_send'){
+ if(!p||!['status','send_test','send_pair','ga_status','ga_validate','ga_send'].includes(p.op))return json({error:'INVALID_REQUEST'},400);
+ if(['ga_status','ga_validate','ga_send'].includes(p.op)){
+  const configured=env.GA4_MEASUREMENT_ID==='G-HGLMQDH5S8'&&typeof env.GA4_API_SECRET==='string'&&!!env.GA4_API_SECRET.trim();
+  if(p.op==='ga_status')return json({configured,measurement_id_matches:env.GA4_MEASUREMENT_ID==='G-HGLMQDH5S8',secret_present:typeof env.GA4_API_SECRET==='string'&&!!env.GA4_API_SECRET.trim(),credentials_verified:false,event_sent:false},configured?200:503);
   if(p.confirm!==true)return json({error:'CONFIRMATION_REQUIRED'},400);
-  if(env.GA4_MEASUREMENT_ID!=='G-HGLMQDH5S8'||typeof env.GA4_API_SECRET!=='string'||!env.GA4_API_SECRET.trim())return json({configured:false,error:'GA4_CONFIG_MISSING_OR_WRONG_STREAM'},503);
-  const qs='?measurement_id='+encodeURIComponent(env.GA4_MEASUREMENT_ID)+'&api_secret='+encodeURIComponent(env.GA4_API_SECRET);
+  if(!configured)return json({configured:false,error:'GA4_CONFIG_MISSING_OR_WRONG_STREAM'},503);
   let payload;try{payload=pairedGaPayload(p,clock())}catch{return json({error:'GA4_FRESH_BROWSER_CONTEXT_REQUIRED'},400)}
+  // Reserve before ANY provider call for a send attempt. Never release a claim,
+  // even on validation failure, timeout or uncertain database/HTTP outcome.
+  if(p.op==='ga_send'){
+   try{
+    const claim=await fetcher(HOST+'/rest/v1/rpc/sm_ga4_reserve_diagnostic',{method:'POST',headers:{apikey:KEY,Authorization:auth,'Content-Type':'application/json'},body:JSON.stringify({p_diagnostic_id:p.diagnostic_id}),redirect:'error',signal:AbortSignal.timeout(8000)});
+    if(!claim.ok)return json({error:'RESERVATION_UNAVAILABLE_DO_NOT_RETRY'},503);
+    const reserved=await claim.json();
+    if(reserved===false)return json({error:'DUPLICATE_DIAGNOSTIC',diagnostic_id:p.diagnostic_id},409);
+    if(reserved!==true)return json({error:'RESERVATION_UNAVAILABLE_DO_NOT_RETRY'},503);
+   }catch{return json({error:'RESERVATION_UNAVAILABLE_DO_NOT_RETRY'},503)}
+  }
+  const qs='?measurement_id='+encodeURIComponent(env.GA4_MEASUREMENT_ID)+'&api_secret='+encodeURIComponent(env.GA4_API_SECRET);
   const post=(path,body)=>fetcher('https://www.google-analytics.com'+path+qs,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),redirect:'error',signal:AbortSignal.timeout(10000)});
-  try{const r=await post('/debug/mp/collect',{...payload,validation_behavior:'ENFORCE_RECOMMENDATIONS'});const b=await r.json();const valid=r.ok&&Array.isArray(b.validationMessages)&&b.validationMessages.length===0;
-  if(!valid||p.op==='ga_validate')return json({configured:true,validation_passed:valid,validation_count:Array.isArray(b.validationMessages)?b.validationMessages.length:null,http:r.status,reporting_event_sent:false,credentials_verified:false});
-  const sent=await post('/mp/collect',payload);
-  return json({configured:true,validation_passed:true,http:sent.status,request_accepted:sent.ok,event_name:'sm_server_diagnostic',diagnostic_id:p.diagnostic_id,session_context_matched:true,debug_mode:true,reporting_receipt_verified:false,check:'GA4 DebugView'});
-  }catch{return json({error:'GA4_REQUEST_UNAVAILABLE_RECONCILE_BEFORE_RETRY'},502)}
+  try{
+   const r=await post('/debug/mp/collect',{...payload,validation_behavior:'ENFORCE_RECOMMENDATIONS'});
+   const b=await r.json();const valid=r.ok&&Array.isArray(b.validationMessages)&&b.validationMessages.length===0;
+   if(!valid||p.op==='ga_validate')return json({configured:true,validation_passed:valid,validation_count:Array.isArray(b.validationMessages)?b.validationMessages.length:null,http:r.status,reporting_event_sent:false,credentials_verified:false,reservation_consumed:p.op==='ga_send'},valid?200:422);
+   // Single collect request; no automatic retry, no claim release.
+   const sent=await post('/mp/collect',payload);
+   return json({configured:true,validation_passed:true,http:sent.status,request_accepted:sent.ok,event_name:'sm_server_diagnostic',diagnostic_id:p.diagnostic_id,session_context_matched:true,debug_mode:true,reporting_receipt_verified:false,reservation_consumed:true,check:'GA4 DebugView'},sent.ok?200:502);
+  }catch{return json({error:'GA4_REQUEST_UNAVAILABLE_RECONCILE_BEFORE_RETRY',reservation_consumed:p.op==='ga_send'},502)}
  }
  const configured=env.META_DATASET_ID===DATASET&&typeof env.META_CAPI_ACCESS_TOKEN==='string'&&env.META_CAPI_ACCESS_TOKEN.length>20;
  if(!configured)return json({configured:false,error:'META_CONFIG_MISSING_OR_WRONG_DATASET'},503);
