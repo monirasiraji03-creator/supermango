@@ -1,0 +1,23 @@
+name: SM04 mock regression
+on:
+  push:
+    branches: ['sm04/engineering-foundation']
+    paths:
+      - 'commerce-foundation/**'
+      - 'api/**'
+      - '.github/workflows/sm04-mock-regression.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: All regression suites (network disabled)
+        run: |
+          node --version
+          node --import ./commerce-foundation/test-no-network.mjs --test commerce-foundation/*.test.mjs
