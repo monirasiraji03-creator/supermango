@@ -2,6 +2,10 @@ import {createHash} from 'node:crypto';
 const HOST="https://zxrysizswqabcuoknxwl.supabase.co", KEY="sb_publishable_IebVrXKD6Mmup8Vw5imMHQ_S-qX9GIK", DATASET='1820219725917949', VERSION='v25.0';
 const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const digest=s=>createHash('sha256').update(s).digest('hex');
+export function pairedGaPayload(p,now){
+ if(!p||!Number.isSafeInteger(now)||!/^sm-ga-[a-f0-9]{32}$/.test(p.diagnostic_id||"")||typeof p.client_id!=="string"||!/^\d{1,20}\.\d{1,20}$/.test(p.client_id)||typeof p.session_id!=="string"||!/^\d{1,16}$/.test(p.session_id)||!Number.isSafeInteger(Number(p.session_id))||Number(p.session_id)<=0||!Number.isSafeInteger(p.captured_at)||p.captured_at>now+5000||now-p.captured_at>900000||!Number.isSafeInteger(p.engagement_ms)||p.engagement_ms<1||p.engagement_ms>60000)throw Error("GA4_FRESH_BROWSER_CONTEXT_REQUIRED");
+ return {client_id:p.client_id,consent:{ad_user_data:"DENIED",ad_personalization:"DENIED"},events:[{name:"sm_server_diagnostic",params:{debug_mode:1,session_id:Number(p.session_id),engagement_time_msec:p.engagement_ms,diagnostic_only:"yes",diagnostic_id:p.diagnostic_id}}]};
+}
 export async function handler(req,env=process.env,fetcher=fetch,clock=()=>Date.now()){
  if(env.VERCEL_ENV!=='preview')return json({error:'PREVIEW_ONLY'},403);
  if(req.method!=='POST')return json({error:'POST_REQUIRED'},405);
@@ -20,12 +24,12 @@ export async function handler(req,env=process.env,fetcher=fetch,clock=()=>Date.n
   if(p.confirm!==true)return json({error:'CONFIRMATION_REQUIRED'},400);
   if(env.GA4_MEASUREMENT_ID!=='G-HGLMQDH5S8'||typeof env.GA4_API_SECRET!=='string'||!env.GA4_API_SECRET.trim())return json({configured:false,error:'GA4_CONFIG_MISSING_OR_WRONG_STREAM'},503);
   const qs='?measurement_id='+encodeURIComponent(env.GA4_MEASUREMENT_ID)+'&api_secret='+encodeURIComponent(env.GA4_API_SECRET);
-  const payload={client_id:'123456789.987654321',consent:{ad_user_data:'DENIED',ad_personalization:'DENIED'},events:[{name:'sm_server_diagnostic',params:{debug_mode:1,engagement_time_msec:1,diagnostic_only:'yes'}}]};
+  let payload;try{payload=pairedGaPayload(p,clock())}catch{return json({error:'GA4_FRESH_BROWSER_CONTEXT_REQUIRED'},400)}
   const post=(path,body)=>fetcher('https://www.google-analytics.com'+path+qs,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),redirect:'error',signal:AbortSignal.timeout(10000)});
   try{const r=await post('/debug/mp/collect',{...payload,validation_behavior:'ENFORCE_RECOMMENDATIONS'});const b=await r.json();const valid=r.ok&&Array.isArray(b.validationMessages)&&b.validationMessages.length===0;
   if(!valid||p.op==='ga_validate')return json({configured:true,validation_passed:valid,validation_count:Array.isArray(b.validationMessages)?b.validationMessages.length:null,http:r.status,reporting_event_sent:false,credentials_verified:false});
   const sent=await post('/mp/collect',payload);
-  return json({configured:true,validation_passed:true,http:sent.status,request_accepted:sent.ok,event_name:'sm_server_diagnostic',debug_mode:true,reporting_receipt_verified:false,check:'GA4 DebugView'});
+  return json({configured:true,validation_passed:true,http:sent.status,request_accepted:sent.ok,event_name:'sm_server_diagnostic',diagnostic_id:p.diagnostic_id,session_context_matched:true,debug_mode:true,reporting_receipt_verified:false,check:'GA4 DebugView'});
   }catch{return json({error:'GA4_REQUEST_UNAVAILABLE_RECONCILE_BEFORE_RETRY'},502)}
  }
  const configured=env.META_DATASET_ID===DATASET&&typeof env.META_CAPI_ACCESS_TOKEN==='string'&&env.META_CAPI_ACCESS_TOKEN.length>20;
