@@ -19,7 +19,7 @@ export async function handler(req,env=process.env,fetcher=fetch,clock=()=>Date.n
   const data=await admin.json();if(data.mode!=='TEST_ONLY'||data.outbound_enabled!==false)return json({error:'ADMIN_REQUIRED'},403);
  }catch{return json({error:'AUTH_CHECK_UNAVAILABLE'},503)}
  let p;try{if(!(req.headers.get('content-type')||'').startsWith('application/json'))throw Error();const raw=await req.text();if(raw.length>400)throw Error();p=JSON.parse(raw)}catch{return json({error:'INVALID_REQUEST'},400)}
- if(!p||!['status','send_test','send_pair','ga_status','ga_validate','ga_send'].includes(p.op))return json({error:'INVALID_REQUEST'},400);
+ if(!p||!['status','send_test','send_pair','meta_prepare_pair','meta_status','ga_status','ga_validate','ga_send'].includes(p.op))return json({error:'INVALID_REQUEST'},400);
  if(['ga_status','ga_validate','ga_send'].includes(p.op)){
   const configured=env.GA4_MEASUREMENT_ID==='G-HGLMQDH5S8'&&typeof env.GA4_API_SECRET==='string'&&!!env.GA4_API_SECRET.trim();
   if(p.op==='ga_status')return json({configured,measurement_id_matches:env.GA4_MEASUREMENT_ID==='G-HGLMQDH5S8',secret_present:typeof env.GA4_API_SECRET==='string'&&!!env.GA4_API_SECRET.trim(),credentials_verified:false,event_sent:false},configured?200:503);
@@ -49,7 +49,23 @@ export async function handler(req,env=process.env,fetcher=fetch,clock=()=>Date.n
   }catch{return json({error:'GA4_REQUEST_UNAVAILABLE_RECONCILE_BEFORE_RETRY',reservation_consumed:p.op==='ga_send'},502)}
  }
  const configured=env.META_DATASET_ID===DATASET&&typeof env.META_CAPI_ACCESS_TOKEN==='string'&&env.META_CAPI_ACCESS_TOKEN.length>20;
+ if(p.op==='meta_status')return json({configured,dataset_matches:env.META_DATASET_ID===DATASET,token_present:typeof env.META_CAPI_ACCESS_TOKEN==='string'&&env.META_CAPI_ACCESS_TOKEN.length>20,event_sent:false},configured?200:503);
  if(!configured)return json({configured:false,error:'META_CONFIG_MISSING_OR_WRONG_DATASET'},503);
+ if(p.op==='meta_prepare_pair'||p.op==='send_pair'){
+  if(p.confirm!==true||!/^sm-pair-[a-f0-9]{32}$/.test(p.event_id||'')||!/^TEST[0-9]{4,12}$/.test(p.test_code||''))return json({error:'PAIR_ID_TEST_CODE_AND_CONFIRMATION_REQUIRED'},400);
+  if(p.op==='send_pair'&&p.browser_receipt_confirmed!==true)return json({error:'BROWSER_RECEIPT_CONFIRMATION_REQUIRED'},400);
+  try{
+   const claim=await fetcher(HOST+'/rest/v1/rpc/sm_meta_claim_pair',{method:'POST',headers:{apikey:KEY,Authorization:auth,'Content-Type':'application/json'},body:JSON.stringify({p_pair_id:p.event_id,p_stage:p.op==='meta_prepare_pair'?'browser':'server'}),redirect:'error',signal:AbortSignal.timeout(8000)});
+   if(!claim.ok)return json({error:'META_RESERVATION_UNAVAILABLE_DO_NOT_RETRY'},503);
+   const state=await claim.json();
+   if(state==='duplicate')return json({error:'DUPLICATE_META_DIAGNOSTIC',event_id:p.event_id},409);
+   if(state==='missing_or_expired')return json({error:'BROWSER_RESERVATION_MISSING_OR_EXPIRED'},409);
+   if(state!=='reserved')return json({error:'META_RESERVATION_UNAVAILABLE_DO_NOT_RETRY'},503);
+   if(p.op==='meta_prepare_pair')return json({reserved:true,event_id:p.event_id,event_name:'SMDedupDiagnostic',event_sent:false});
+  }catch{return json({error:'META_RESERVATION_UNAVAILABLE_DO_NOT_RETRY'},503)}
+ }
+ // Standalone legacy event sending disabled; only a controlled pair is permitted.
+ if(p.op==='send_test')return json({error:'LEGACY_DIAGNOSTIC_DISABLED'},403);
  const base='https://graph.facebook.com/'+VERSION+'/'+DATASET;
  const headers={Authorization:'Bearer '+env.META_CAPI_ACCESS_TOKEN,'Content-Type':'application/json'};
  try{
@@ -64,7 +80,7 @@ export async function handler(req,env=process.env,fetcher=fetch,clock=()=>Date.n
   const eventName=paired?'SMDedupDiagnostic':'SMIntegrationDiagnostic';
   const body={test_event_code:p.test_code,data:[{event_name:eventName,event_time:Math.floor(clock()/1000),event_id:eventId,action_source:'website',event_source_url:origin+(paired?'/pixel-test.html':'/meta-test.html'),user_data:{client_user_agent:'SuperMango-IntegrationDiagnostic/1.0',external_id:[digest('supermango-synthetic-diagnostic-only')]}}]};
   const r=await fetcher(base+'/events',{method:'POST',headers,body:JSON.stringify(body),redirect:'error',signal:AbortSignal.timeout(10000)});const b=await r.json().catch(()=>null);
-  return json({configured:true,accepted:r.ok&&b?.events_received===1,provider_http:r.status,provider_code:Number.isInteger(b?.error?.code)?b.error.code:null,event_name:eventName,event_id:eventId,test_code_supplied:true});
+  return json({configured:true,accepted:r.ok&&b?.events_received===1,provider_http:r.status,provider_code:Number.isInteger(b?.error?.code)?b.error.code:null,event_name:eventName,event_id:eventId,test_code_supplied:true,reservation_consumed:true,deduplication_verified:false},r.ok&&b?.events_received===1?200:502);
  }catch{return json({error:'PROVIDER_UNAVAILABLE_RECONCILE_BEFORE_RETRY'},502)}
 }
 export default {fetch(req){return handler(req);}};
